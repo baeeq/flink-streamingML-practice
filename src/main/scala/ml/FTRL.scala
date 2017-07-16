@@ -31,7 +31,7 @@ object FTRL {
 
     val trainingData = env.socketTextStream(hostname, port, '\n')
 
-  //input stream: index, value, label
+  //input stream: feature_index, value, label, data_index
 
     val data: DataStream[Data] = trainingData.map(s => {
       val splits = s.split(",")
@@ -57,21 +57,24 @@ object FTRL {
 
   def buildPartialModel(key: Int, value: Iterable[Data]): Params = {
     var postW = w.get(key)
-    val zi = z(key)
-    val ni = n(key)
+    var prob = 0
+    var zi = z(key)
+    var ni = n(key)
     value.map{
       e => {
-        val prob = predict(zi, ni, key, e, postW)
-        val
-        update(key, prob, value)
-        res._1
+        (postW, prob) = predict(zi, ni, key, e, postW)  // 串行 or 并行？
+        (zi, ni) = update(key, prob, postW, e, zi, ni)
+        0
       }
     }
+    w.put(key, postW)
+    z(key) = zi
+    n(key) = ni
+    Params(key, postW)
   }
 
-  def predict(zi: Double, ni: Double, key: Int, e: Data, postW: Double): Double = {
+  def predict(zi: Double, ni: Double, key: Int, e: Data, postW: Double): (Double, Double) = {
     var post = postW
-    var wTx = 0
     val sgn = {
       if (zi < 0){
         -1
@@ -86,17 +89,13 @@ object FTRL {
     else{
       post = (sgn * lamda1 - zi) / (lamda2 + (beta + Math.sqrt(ni)) / alpha)
     }
-//    wTx += w.get(key) * e.value
-//
-//
-//    w.put(key, post)
-//    (Params(key, post), 1 / (1 + Math.exp(-Math.max(Math.min(wTx, 35), -35))))
+    val wTx  = post * e.value  // question: how to calculate wTx?  考虑数据并行...
+    (post, 1 / (1 + Math.exp(-Math.max(Math.min(wTx, 35), -35))))
   }
 
-  def update(key: Int, prob: Double, data: Iterable[Data]): Unit = {
+  def update(key: Int, prob: Double, w:Double, e: Data, zi:Double, ni:Double): (Double, Double) = {
     var zi = 0
     var ni = 0
-    data.map{ e=>
     val ans = {
       if (e.label > 0){
         1
@@ -107,18 +106,15 @@ object FTRL {
 
     }
       val g = (prob - ans) * e.value
-      val sigma = ( .sqrt(n(key) + g * g) - Math.sqrt(n(key))) / alpha
-      zi += g - sigma * w.get(key)
+      val sigma = ( Math.sqrt(n(key) + g * g) - Math.sqrt(n(key))) / alpha
+      zi += g - sigma * w
       ni += g*g
-      0
-  }
-    z(key) += zi
-    n(key) += ni
+    (zi, ni)
   }
 
-  def partialGradient(x: Double, y : Double): Double = {
+/*  def partialGradient(x: Double, y : Double): Double = {
     y - x
-  }
+  }*/
 
   case class Data(index: Int, value:Double, label: Double)
 
