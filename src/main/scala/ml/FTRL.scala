@@ -15,6 +15,7 @@ import org.apache.flink.util.Collector
 object FTRL {
 
   var w = new util.HashMap[Int, Double]()
+//  var wTx = 0.0
   val lamda1 = 0.1
   val lamda2 = 0.3
   val alpha = 0.03
@@ -31,14 +32,47 @@ object FTRL {
 
     val trainingData = env.socketTextStream(hostname, port, '\n')
 
-  //input stream: feature_index, value, label, data_index
+    // input stream: label feature_index1: value1, feature_index2: value2, ...,
 
-    val data: DataStream[Data] = trainingData.map(s => {
-      val splits = s.split(",")
-      Data(splits(0).toInt, splits(1).toDouble, splits(2).toDouble)
+    val data: DataStream[Data] = trainingData
+        .map(s => {
+          var wTx = 0.0
+          val splits = s.split(" ") // splits(0): label
+          for (elem <- splits(1).split(',')){
+            wTx = wTx + elem.split(':')(1).toDouble * w.get(elem.split(':')(0).toInt)
+          }
+          (splits(0).toInt, splits(1), wTx)
+        }
+        )
+      .flatMap(x => {
+        x._2.split(',').map((x._1, _, x._3))
+      }).map(x => {
+      val splits = x._2.split(':')
+      Data(x._1, splits(1).toDouble, splits(2).toDouble, x._3)
     })
 
-    val model: DataStream[Params] = data
+      val model: DataStream[Params] = data
+      .filter(x => x.index < dim && x.index >= 0)  // index小于0或大于维度的过滤
+      .keyBy(_.index)
+      .timeWindow(Time.seconds(10))
+      .apply{(
+               key: Int,
+               window: TimeWindow,
+               events: Iterable[Data],
+               out: Collector[Params]) =>
+        out.collect(buildPartialModel(key, events))
+      }
+    model.print().setParallelism(1)
+    env.execute("model train")
+
+
+/*    val data: DataStream[Data] = trainingData
+      .map(s => {
+      val splits = s.split(",")
+      Data(splits(0).toInt, splits(1).toDouble, splits(2).toDouble, splits(3).toDouble)
+    })*/
+
+/*    val model: DataStream[Params] = data
         .filter(x => x.index < dim && x.index >= 0)  // index小于0或大于维度的过滤
         .keyBy(_.index)
       .timeWindow(Time.seconds(10))
@@ -50,7 +84,7 @@ object FTRL {
           out.collect(buildPartialModel(key, events))
         }
     model.print().setParallelism(1)
-    env.execute("model train")
+    env.execute("model train")*/
 
   }
 
@@ -89,7 +123,7 @@ object FTRL {
     else{
       post = (sgn * lamda1 - zi) / (lamda2 + (beta + Math.sqrt(ni)) / alpha)
     }
-    val wTx  = post * e.value  // question: how to calculate wTx?  考虑数据并行...
+    val wTx  = e.wTx - w.get(key) * e.value + post * e.value
     (post, 1 / (1 + Math.exp(-Math.max(Math.min(wTx, 35), -35))))
   }
 
@@ -116,7 +150,7 @@ object FTRL {
     y - x
   }*/
 
-  case class Data(index: Int, value:Double, label: Double)
+  case class Data(index: Int, value:Double, label: Double, wTx: Double)
 
   case class Params(i: Int, w: Double) {
 
